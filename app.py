@@ -41,6 +41,8 @@ def load_data():
     else:
         return pd.DataFrame(columns=['日期', '時間', '使用者', '血糖', '尿酸', '體重', '備註'])
 
+
+
 # 儲存數據去 Google Sheets
 def save_data(df_to_save):
     client = init_connection()
@@ -51,7 +53,27 @@ def save_data(df_to_save):
     # 寫入成個 DataFrame
     sheet.update([df_clean.columns.values.tolist()] + df_clean.values.tolist())
 
+# ==========================================
+# 讀寫用戶密碼專用函數
+# ==========================================
+def load_users():
+    client = init_connection()
+    sheet = client.open(SHEET_NAME).worksheet('UserAccounts') # 讀取新分頁
+    data = sheet.get_all_records()
+    if data:
+        # 將數據全部轉做字串，避免密碼「1234」變成數字格式出 bug
+        return pd.DataFrame(data).astype(str)
+    else:
+        return pd.DataFrame(columns=['使用者', '密碼'])
+
+def save_users_df(users_df_to_save):
+    client = init_connection()
+    sheet = client.open(SHEET_NAME).worksheet('UserAccounts')
+    sheet.clear()
+    sheet.update([users_df_to_save.columns.values.tolist()] + users_df_to_save.values.tolist())
+
 df = load_data()
+users_df = load_users() # <--- 新增呢行，一開 App 就讀取用戶名冊
 
 st.title('🏠 家庭健康紀錄 App')
 
@@ -60,41 +82,55 @@ st.title('🏠 家庭健康紀錄 App')
 # ==========================================
 st.header('📝 新增紀錄')
 
-# 1. 取得資料庫中已有的使用者名單（排除重複）
-existing_users = df['使用者'].dropna().unique().tolist()
+# 從密碼名冊度讀取現有使用者名單
+existing_users = users_df['使用者'].tolist()
 
 with st.form("input_form", clear_on_submit=True):
-    # 提供下拉選單畀舊用戶，預設第一個選項係「-- 新增使用者 --」
     options = ['-- 新增使用者 --'] + existing_users
     selected_user = st.selectbox('選擇使用者', options)
     
-    # 提供文字框畀新用戶輸入名字
-    new_user = st.text_input('如果係新使用者，請喺度輸入名字：', placeholder="例如：阿哥")
+    # 用兩行排版，令介面整齊啲
+    col_u1, col_u2 = st.columns(2)
+    with col_u1:
+        new_user = st.text_input('新使用者名字 (舊用戶請留空)')
+    with col_u2:
+        # 如果係新用戶，呢一格就係「設定密碼」
+        new_password = st.text_input('設定密碼 (只限新用戶填寫)', type='password', placeholder="例如: 1234")
     
     col1, col2 = st.columns(2)
     with col1:
         record_date = st.date_input('日期', date.today())
     with col2:
-        # 預設時間設定為現在這一刻 (now)，並將秒數隱藏
         record_time = st.time_input('時間', datetime.now().replace(second=0, microsecond=0).time())
         
     blood_sugar = st.number_input('血糖 (mmol/L)', min_value=0.0, value=None, format="%.1f")
     uric_acid = st.number_input('尿酸 (μmol/L)', min_value=0.0, value=None, format="%.1f")
-    
     weight = st.number_input('體重 (kg)', min_value=0.0, value=None, format="%.1f")
     notes = st.selectbox('備註', ['飯前', '飯後'])
     
     submit_button = st.form_submit_button(label='💾 儲存紀錄')
     
     if submit_button:
-        final_user = new_user.strip() if new_user.strip() != "" else selected_user
+        is_new = (selected_user == '-- 新增使用者 --')
+        final_user = new_user.strip() if is_new else selected_user
         
-        if final_user == '-- 新增使用者 --' or final_user == "":
+        # 錯誤檢查機制
+        if final_user == "" or final_user == '-- 新增使用者 --':
             st.error("⚠️ 請選擇或輸入使用者名稱！")
+        elif is_new and new_password == "":
+            st.error("⚠️ 新使用者必須設定密碼！")
         else:
+            # 1. 如果係新用戶，先儲存佢個名同密碼入 UserAccounts
+            if is_new:
+                new_user_data = pd.DataFrame([{'使用者': final_user, '密碼': new_password}])
+                users_df = pd.concat([users_df, new_user_data], ignore_index=True)
+                save_users_df(users_df)
+                st.info(f"🔑 成功為 {final_user} 建立帳戶及設定密碼！")
+            
+            # 2. 儲存健康數據入主資料庫
             new_data = pd.DataFrame([{
                 '日期': str(record_date),
-                '時間': str(record_time.strftime("%H:%M")), # <--- 將時間格式化為 小時:分鐘 (例如 14:30)
+                '時間': str(record_time.strftime("%H:%M")),
                 '使用者': final_user,
                 '血糖': blood_sugar,
                 '尿酸': uric_acid,
@@ -104,91 +140,100 @@ with st.form("input_form", clear_on_submit=True):
             df = pd.concat([df, new_data], ignore_index=True)
             save_data(df)
             
-            st.success(f'✅ 成功儲存 {final_user} 的紀錄！')
+            st.success(f'✅ 成功儲存 {final_user} 的健康紀錄！')
             st.rerun()
-
+            
 # ==========================================
 # 第二部分：展示區 (Dashboard) - 數據獨立的核心！
 # ==========================================
 st.header('📊 查看數據')
 
-if not df.empty:
-    # 同樣動態讀取名單
-    existing_users = df['使用者'].dropna().unique().tolist()
+# 1. 改為從 users_df (用戶名冊) 讀取名單
+existing_users = users_df['使用者'].tolist() if not users_df.empty else []
+
+if existing_users:
+    view_user = st.selectbox('你想查看誰的數據？', existing_users)
     
-    if existing_users:
-        view_user = st.selectbox('你想查看誰的數據？', existing_users)
+    # 2. 從 users_df 搵返呢個 user 嘅正確密碼出嚟
+    correct_password = str(users_df.loc[users_df['使用者'] == view_user, '密碼'].values[0])
+    
+    # 3. 顯示密碼輸入框
+    input_password = st.text_input(f'🔒 請輸入 {view_user} 的專屬密碼解鎖：', type='password')
+    
+    # 4. 驗證密碼
+    if input_password == correct_password:
+        st.success('🔓 解鎖成功！')
         
+        # --- 👇 新增：更改密碼功能 👇 ---
+        with st.expander("⚙️ 更改帳戶密碼"):
+            new_pass = st.text_input("請輸入新密碼", type="password", key=f"new_pass_{view_user}")
+            if st.button("💾 確認更改密碼"):
+                if new_pass.strip() != "":
+                    # 更新 DataFrame 入面嘅密碼
+                    users_df.loc[users_df['使用者'] == view_user, '密碼'] = new_pass
+                    # 寫入 Google Sheets
+                    save_users_df(users_df)
+                    st.success("✅ 密碼更改成功！下次請使用新密碼解鎖。")
+                else:
+                    st.error("⚠️ 密碼不能為空！")
+        # --- 👆 更改密碼功能完畢 👆 ---
+
+        # ==========================================
+        # 以下係你原本嘅畫圖同表格代碼 (全部縮排咗放入嚟呢個 if 入面)
+        # ==========================================
         filtered_df = df[df['使用者'] == view_user]
-    
-    if not filtered_df.empty:
-        # --- 👇 新增：飯前/飯後篩選器 👇 ---
-        # 加入 horizontal=True 令啲掣橫向排列，慳位啲又靚啲
-        meal_filter = st.radio('🔍 篩選圖表顯示時段：', ['全部', '飯前', '飯後'], horizontal=True)
         
-        # 複製一份數據用嚟處理圖表，避免影響下方嘅 st.data_editor 歷史表格
-        chart_df = filtered_df.copy()
-        
-        # 根據用家選擇，過濾數據
-        if meal_filter != '全部':
-            # 如果揀咗飯前/飯後，就淨係保留「備註」欄位符合選擇嘅數據
-            chart_df = chart_df[chart_df['備註'] == meal_filter]
-        # --- 👆 篩選器完畢 👆 ---
-        
-        # 檢查篩選之後仲有冇數據 (例如可能揀咗「飯後」但其實從來未入過飯後數據)
-        if not chart_df.empty:
-            # 1. 合併並轉換成時間格式 (為咗可以正確排序)
-            chart_df['日期時間'] = pd.to_datetime(chart_df['日期'] + ' ' + chart_df['時間'])
+        if not filtered_df.empty:
+            # 加入 horizontal=True 令啲掣橫向排列，慳位啲又靚啲
+            meal_filter = st.radio('🔍 篩選圖表顯示時段：', ['全部', '飯前', '飯後'], horizontal=True)
             
-            # 2. 按時間先後排好次序
-            chart_df = chart_df.sort_values('日期時間')
+            # 複製一份數據用嚟處理圖表，避免影響下方嘅 st.data_editor 歷史表格
+            chart_df = filtered_df.copy()
             
-            # 3. 排好序之後，將時間轉換返做「純文字字串」
-            chart_df['日期時間'] = chart_df['日期時間'].dt.strftime('%Y-%m-%d %H:%M')
+            # 根據用家選擇，過濾數據
+            if meal_filter != '全部':
+                chart_df = chart_df[chart_df['備註'] == meal_filter]
             
-            # 4. 設定為 X 軸 (Index)
-            chart_df = chart_df.set_index('日期時間')
+            # 檢查篩選之後仲有冇數據
+            if not chart_df.empty:
+                chart_df['日期時間'] = pd.to_datetime(chart_df['日期'] + ' ' + chart_df['時間'])
+                chart_df = chart_df.sort_values('日期時間')
+                chart_df['日期時間'] = chart_df['日期時間'].dt.strftime('%Y-%m-%d %H:%M')
+                chart_df = chart_df.set_index('日期時間')
+                
+                st.subheader(f'📈 {view_user} 的血糖趨勢 ({meal_filter})')
+                st.line_chart(chart_df['血糖'].dropna())
+                
+                st.subheader(f'🩸 {view_user} 的尿酸趨勢 ({meal_filter})')
+                st.line_chart(chart_df['尿酸'].dropna())
+                
+                st.subheader(f'⚖️ {view_user} 的體重趨勢 ({meal_filter})')
+                st.line_chart(chart_df['體重'].dropna())
+            else:
+                st.warning(f"⚠️ {view_user} 暫時未有「{meal_filter}」嘅紀錄呀！")
             
-            # 顯示血糖折線圖
-            st.subheader(f'📈 {view_user} 的血糖趨勢 ({meal_filter})')
-            st.line_chart(chart_df['血糖'].dropna())
+            # 顯示詳細歷史紀錄表格 (升級做可編輯版本！)
+            st.subheader('📋 詳細歷史紀錄 (可直接雙擊修改或選取刪除)')
             
-            # 顯示尿酸折線圖
-            st.subheader(f'🩸 {view_user} 的尿酸趨勢 ({meal_filter})')
-            st.line_chart(chart_df['尿酸'].dropna())
+            edited_df = st.data_editor(
+                filtered_df, 
+                num_rows="dynamic",        
+                use_container_width=True,
+                key=f"editor_{view_user}"  
+            )
             
-            # 顯示體重折線圖
-            st.subheader(f'⚖️ {view_user} 的體重趨勢 ({meal_filter})')
-            st.line_chart(chart_df['體重'].dropna())
+            if st.button('🔄 儲存表格修改'):
+                main_df_without_user = df[df['使用者'] != view_user]
+                df = pd.concat([main_df_without_user, edited_df], ignore_index=True)
+                save_data(df)
+                st.success(f'✅ 成功更新 {view_user} 的紀錄！')
+                st.rerun() 
         else:
-            # 如果篩選後無數據，就顯示溫馨提示
-            st.warning(f"⚠️ {view_user} 暫時未有「{meal_filter}」嘅紀錄呀！")
-        
-        # 顯示詳細歷史紀錄表格 (升級做可編輯版本！)
-        st.subheader('📋 詳細歷史紀錄 (可直接雙擊修改或選取刪除)')
-        
-        # 使用 st.data_editor 代替原本嘅 st.dataframe
-        edited_df = st.data_editor(
-            filtered_df, 
-            num_rows="dynamic",        # 開啟呢個設定就可以畀用家新增或刪除整行資料
-            use_container_width=True,
-            key=f"editor_{view_user}"  # 加入 key 確保切換使用者時表格識得重新載入
-        )
-        
-        # 加一個專屬按鈕去確認儲存表格嘅修改
-        if st.button('🔄 儲存表格修改'):
-            # 邏輯：先喺主資料庫 (df) 移除呢個 user 嘅所有舊紀錄
-            main_df_without_user = df[df['使用者'] != view_user]
+            st.info(f'暫時未有 {view_user} 的健康紀錄。')
             
-            # 然後將畫面上面修改好嘅新表格 (edited_df) 合併返入去
-            df = pd.concat([main_df_without_user, edited_df], ignore_index=True)
-            
-            # 儲存入 Google Sheets
-            save_data(df)
-            
-            st.success(f'✅ 成功更新 {view_user} 的紀錄！')
-            st.rerun() # 重新載入頁面更新圖表
-    else:
-        st.info(f'暫時未有 {view_user} 的紀錄。')
+    # 如果密碼唔啱，又唔係留空，就出 Error
+    elif input_password != "":
+        st.error("❌ 密碼錯誤，請重新輸入！ (如果忘記密碼，請搵 Admin 處理)")
+
 else:
-    st.info('目前未有任何數據，請先在上方新增紀錄！')
+    st.info('目前未有任何使用者，請先在上方新增紀錄！')
