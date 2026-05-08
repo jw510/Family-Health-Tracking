@@ -83,19 +83,18 @@ st.title('🏠 家庭健康紀錄 App')
 st.header('📝 新增紀錄')
 
 # 從密碼名冊度讀取現有使用者名單
-existing_users = users_df['使用者'].tolist()
+existing_users = users_df['使用者'].tolist() if not users_df.empty else []
 
 with st.form("input_form", clear_on_submit=True):
     options = ['-- 新增使用者 --'] + existing_users
     selected_user = st.selectbox('選擇使用者', options)
     
-    # 用兩行排版，令介面整齊啲
     col_u1, col_u2 = st.columns(2)
     with col_u1:
         new_user = st.text_input('新使用者名字 (舊用戶請留空)')
     with col_u2:
-        # 如果係新用戶，呢一格就係「設定密碼」
-        new_password = st.text_input('設定密碼 (只限新用戶填寫)', type='password', placeholder="例如: 1234")
+        # 🔑 升級：將密碼欄位改為所有人必須填寫
+        input_password = st.text_input('密碼 (新用戶設定密碼 / 舊用戶輸入密碼確認)', type='password')
     
     col1, col2 = st.columns(2)
     with col1:
@@ -114,34 +113,46 @@ with st.form("input_form", clear_on_submit=True):
         is_new = (selected_user == '-- 新增使用者 --')
         final_user = new_user.strip() if is_new else selected_user
         
-        # 錯誤檢查機制
+        # 1. 基本錯誤檢查
         if final_user == "" or final_user == '-- 新增使用者 --':
             st.error("⚠️ 請選擇或輸入使用者名稱！")
-        elif is_new and new_password == "":
-            st.error("⚠️ 新使用者必須設定密碼！")
+        elif input_password == "":
+            st.error("⚠️ 必須輸入密碼！(新用戶請設定密碼，舊用戶請輸入專屬密碼以確認身份)")
         else:
-            # 1. 如果係新用戶，先儲存佢個名同密碼入 UserAccounts
+            # 2. 密碼驗證邏輯
+            password_is_correct = False
+            
             if is_new:
-                new_user_data = pd.DataFrame([{'使用者': final_user, '密碼': new_password}])
+                # 如果係新用戶，儲存佢個名同密碼入 UserAccounts
+                new_user_data = pd.DataFrame([{'使用者': final_user, '密碼': input_password}])
                 users_df = pd.concat([users_df, new_user_data], ignore_index=True)
                 save_users_df(users_df)
                 st.info(f"🔑 成功為 {final_user} 建立帳戶及設定密碼！")
+                password_is_correct = True # 新用戶設定完即代表驗證通過
+            else:
+                # 如果係舊用戶，程式會去 Google Sheets 對答案
+                correct_password = str(users_df.loc[users_df['使用者'] == final_user, '密碼'].values[0])
+                if input_password == correct_password:
+                    password_is_correct = True
+                else:
+                    st.error(f"❌ 密碼錯誤！無法為 {final_user} 新增紀錄，請確認身份再試。")
             
-            # 2. 儲存健康數據入主資料庫
-            new_data = pd.DataFrame([{
-                '日期': str(record_date),
-                '時間': str(record_time.strftime("%H:%M")),
-                '使用者': final_user,
-                '血糖': blood_sugar,
-                '尿酸': uric_acid,
-                '體重': weight,
-                '備註': notes
-            }])
-            df = pd.concat([df, new_data], ignore_index=True)
-            save_data(df)
-            
-            st.success(f'✅ 成功儲存 {final_user} 的健康紀錄！')
-            st.rerun()
+            # 3. 只有「密碼正確」或者「成功建立新用戶」，先至准儲存健康數據
+            if password_is_correct:
+                new_data = pd.DataFrame([{
+                    '日期': str(record_date),
+                    '時間': str(record_time.strftime("%H:%M")),
+                    '使用者': final_user,
+                    '血糖': blood_sugar,
+                    '尿酸': uric_acid,
+                    '體重': weight,
+                    '備註': notes
+                }])
+                df = pd.concat([df, new_data], ignore_index=True)
+                save_data(df)
+                
+                st.success(f'✅ 身份確認！成功儲存 {final_user} 的健康紀錄！')
+                st.rerun()
             
 # ==========================================
 # 第二部分：展示區 (Dashboard) - 數據獨立的核心！
