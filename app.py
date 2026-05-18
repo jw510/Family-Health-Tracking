@@ -1,9 +1,10 @@
 import streamlit as st
 import pandas as pd
-from datetime import date, datetime
+from datetime import date, datetime, timezone, timedelta
 import numpy as np
 import gspread
 from google.oauth2.service_account import Credentials
+
 
 # ==========================================
 # Google Sheets 連線設定
@@ -39,7 +40,7 @@ def load_data():
         df.replace("", np.nan, inplace=True)
         return df
     else:
-        return pd.DataFrame(columns=['日期', '時間', '使用者', '血糖', '尿酸', '體重', '備註', '飲食'])
+        return pd.DataFrame(columns=['日期', '時間', '使用者', '血糖', '尿酸', '體重', '備註'])
 
 
 
@@ -98,21 +99,21 @@ with st.form("input_form", clear_on_submit=True):
     
     col1, col2 = st.columns(2)
     with col1:
-        record_date = st.date_input('日期', date.today())
+        # 日期同樣需要根據香港時間計算，避免凌晨過後日期唔啱
+        hk_tz = timezone(timedelta(hours=8)) 
+        current_hk_datetime = datetime.now(hk_tz)
+        record_date = st.date_input('日期', current_hk_datetime.date())
+        
     with col2:
-        record_time = st.time_input('時間', datetime.now().replace(second=0, microsecond=0).time())
+        # 獲取香港時間嘅 HH:MM
+        current_hk_time = current_hk_datetime.replace(second=0, microsecond=0).time()
+        # 加入 step=60，令 Dropdown list 變成每 1 分鐘 (60秒) 一格
+        record_time = st.time_input('時間', value=current_hk_time, step=60)
         
     blood_sugar = st.number_input('血糖 (mmol/L)', min_value=0.0, value=None, format="%.1f")
     uric_acid = st.number_input('尿酸 (μmol/L)', min_value=0.0, value=None, format="%.1f")
     weight = st.number_input('體重 (kg)', min_value=0.0, value=None, format="%.1f")
-    
-    # --- 👇 新增：將備註同食物紀錄拍埋一齊 👇 ---
-    col_n1, col_n2 = st.columns(2)
-    with col_n1:
-        notes = st.selectbox('備註', ['飯前', '飯後'])
-    with col_n2:
-        food_record = st.text_input('飲食紀錄 (選填，例如：一碗白飯、半件蛋糕)')
-    # --- 👆 介面更新完畢 👆 ---
+    notes = st.selectbox('備註', ['飯前', '飯後'])
     
     submit_button = st.form_submit_button(label='💾 儲存紀錄')
     
@@ -120,29 +121,31 @@ with st.form("input_form", clear_on_submit=True):
         is_new = (selected_user == '-- 新增使用者 --')
         final_user = new_user.strip() if is_new else selected_user
         
-        # 1. 基本錯誤檢查 (維持不變)
+        # 1. 基本錯誤檢查
         if final_user == "" or final_user == '-- 新增使用者 --':
             st.error("⚠️ 請選擇或輸入使用者名稱！")
         elif input_password == "":
             st.error("⚠️ 必須輸入密碼！(新用戶請設定密碼，舊用戶請輸入專屬密碼以確認身份)")
         else:
-            # 2. 密碼驗證邏輯 (維持不變，呢度照舊用你原本嘅 code)
+            # 2. 密碼驗證邏輯
             password_is_correct = False
             
             if is_new:
+                # 如果係新用戶，儲存佢個名同密碼入 UserAccounts
                 new_user_data = pd.DataFrame([{'使用者': final_user, '密碼': input_password}])
                 users_df = pd.concat([users_df, new_user_data], ignore_index=True)
                 save_users_df(users_df)
                 st.info(f"🔑 成功為 {final_user} 建立帳戶及設定密碼！")
-                password_is_correct = True
+                password_is_correct = True # 新用戶設定完即代表驗證通過
             else:
+                # 如果係舊用戶，程式會去 Google Sheets 對答案
                 correct_password = str(users_df.loc[users_df['使用者'] == final_user, '密碼'].values[0])
                 if input_password == correct_password:
                     password_is_correct = True
                 else:
                     st.error(f"❌ 密碼錯誤！無法為 {final_user} 新增紀錄，請確認身份再試。")
             
-            # 3. 只有「密碼正確」，先至准儲存健康數據
+            # 3. 只有「密碼正確」或者「成功建立新用戶」，先至准儲存健康數據
             if password_is_correct:
                 new_data = pd.DataFrame([{
                     '日期': str(record_date),
@@ -151,8 +154,7 @@ with st.form("input_form", clear_on_submit=True):
                     '血糖': blood_sugar,
                     '尿酸': uric_acid,
                     '體重': weight,
-                    '備註': notes,
-                    '飲食': food_record  # <--- 👇 新增呢行，將食物紀錄寫入資料庫 👇
+                    '備註': notes
                 }])
                 df = pd.concat([df, new_data], ignore_index=True)
                 save_data(df)
